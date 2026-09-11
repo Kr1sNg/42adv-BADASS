@@ -1,24 +1,8 @@
 #!/bin/sh
+set -eu
 
-set -e
+# Start the FRR daemons
+/usr/lib/frr/docker-start &
 
-echo "Starting FRRouting..."
-
-mkdir -p /var/run/frr
-chown -R frr:frr /var/run/frr
-
-# Start zebra at first
-/usr/lib/frr/zebra -d
-
-sleep 1
-
-# Start routing daemons
-/usr/lib/frr/bgpd -d
-/usr/lib/frr/ospfd -d
-/usr/lib/frr/isisd -d
-
-echo "FRRouting started."
-echo "BGP, OSPF and IS-IS are active."
-
-# Keep container alive
-exec tail -f /dev/null
+# Keep the GNS3 console interactive. From here, use `vtysh` to configure FRR.
+exec /bin/sh -i
