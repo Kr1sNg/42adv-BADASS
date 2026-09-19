@@ -261,7 +261,7 @@ write memory
 
 ## Part 2: Discovering a VXLAN
 
-###
+### [Cours VXLAN](https://youtube.com/playlist?list=PLmVr8r1kmMm1LucO47Ch5CDJWgBb2X6YE&si=pRrnY0TlgMFllbFj)
 
 ## Part 3: Discovering BGP with EVPN
 
