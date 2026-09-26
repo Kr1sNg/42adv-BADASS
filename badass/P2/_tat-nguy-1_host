@@ -1,0 +1,13 @@
+# =====================================================================
+# host-tat-nguy-1 - Part 2 - GNS3 "Edit config"
+# ---------------------------------------------------------------------
+# Overlay address. Both hosts are in the same subnet (30.1.1.0/24) with
+# no gateway: they talk at Layer 2 through the VXLAN tunnel, as if they
+# were plugged into the same switch.
+# eth1 is cabled to routeur-tat-nguy-1 eth1 (adjust if needed).
+# =====================================================================
+
+auto eth1
+iface eth1 inet static
+    address 30.1.1.1
+    netmask 255.255.255.0

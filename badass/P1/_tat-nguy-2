@@ -1,0 +1,16 @@
+# routeur-tat-nguy-1 - network configuration (GNS3 "Edit config")
+# Applied at boot like the host's file. The routing daemons
+# (zebra, bgpd, ospfd, isisd) are started by the FRR image itself,
+# not by this file.
+# The address is set here only, not also in vtysh/frr.conf,
+# to avoid configuring it twice.
+
+# Bring eth2 up automatically at boot
+auto eth2
+
+# eth2 = the port cabled to host-tat-nguy-1 in the GNS3 topology
+iface eth2 inet static
+    # Router address in the same subnet as the host
+    address 192.168.0.1
+    # /24 mask: same network as the host (192.168.0.0/24)
+    netmask 255.255.255.0

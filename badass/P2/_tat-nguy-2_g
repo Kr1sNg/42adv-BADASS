@@ -1,0 +1,34 @@
+# =====================================================================
+# routeur-tat-nguy-2 - Part 2 - DYNAMIC MULTICAST (group) VXLAN
+# GNS3 "Edit config" (/etc/network/interfaces, applied at every boot)
+# ---------------------------------------------------------------------
+# eth0 : underlay, cabled to Switch-tat-nguy, IP 10.1.1.2/24
+# eth1 : host side, NO IP (it is only a port of bridge br0)
+# vxlan10 : VTEP, VNI 10, UDP 4789, multicast group 239.1.1.1
+# br0  : Linux bridge (software switch) joining eth1 and vxlan10
+#
+# Multicast mode: no remote peer is configured. Each VTEP joins group
+# 239.1.1.1 (IGMP) on eth0. BUM traffic (e.g. ARP) is sent to the
+# group, so every VTEP of VNI 10 receives it. Once MACs are learned,
+# traffic becomes unicast between VTEPs (flood-and-learn).
+# =====================================================================
+
+# Host-facing port: no address, just bring it up
+auto eth1
+iface eth1 inet manual
+    up ip link set eth1 up
+
+# Underlay interface + VXLAN + bridge
+auto eth0
+iface eth0 inet static
+    address 10.1.1.2
+    netmask 255.255.255.0
+    # VXLAN interface: VNI 10, multicast group instead of a fixed peer.
+    # "dev eth0" is mandatory: it tells which interface joins the group.
+    up ip link add name vxlan10 type vxlan id 10 dev eth0 group 239.1.1.1 dstport 4789
+    up ip link set vxlan10 up
+    # Bridge br0: frames from the host enter the tunnel and vice versa.
+    up brctl addbr br0
+    up brctl addif br0 eth1
+    up brctl addif br0 vxlan10
+    up ip link set br0 up

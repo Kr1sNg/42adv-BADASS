@@ -182,10 +182,17 @@ Le sujet demande explicitement de configurer différents daemon tel que :
 
 - `vtysh` provides a combined frontend to all FRR daemons in a single combined session.
 
-### Add a network to a PC
+### Add a network to a PC (host)
 
 > In real life, it's automatic done by DHCP (Dynamic Host Configuration Protocol) inside Wifi/Internet Box.
 > So we don't do that manually with new PC, new Internet Box, etc...
+
+In case cannot connect directly from GNS3 Interface, using:
+
+```
+// /opt/homebrew/bin/telnet {IP address of host} {port}
+telnet 192.168.64.13 5004
+```
 
 ```bash
 ip addr add 192.168.0.2/24 dev eth0
@@ -206,13 +213,22 @@ ip link set eth0 up
 Means: "active l'interface eth0"
 
 ```bash
-ip addr show eth2 # to check if ip address is well added
+ip addr show eth0 # to check if ip address is well added
+ip route
 ```
 
 ### Configure a Router
 
 > Of couse a Router can have multiple IP Addresses
 > router has multiple ports or interfaces, it needs at least one unique IP address for every network segments or subnet it connects to.
+
+In case cannot connect directly from GNS3 Interface, using:
+
+```
+// /opt/homebrew/bin/telnet {IP address of router} {port}
+telnet 192.168.64.13 5000
+```
+
 
 - Using `vtysh` (vty shell) of `FRRouting`
 
@@ -259,9 +275,255 @@ vtysh
 write memory
 ```
 
+### Testing
+
+1. Make sure there are 2 Docker images in VM: `host` and `router`.
+
+2. Run `gns3server` on VM.
+
+3. Connect to GNS3 Interface on host machine.
+
+4. 
+
 ## Part 2: Discovering a VXLAN
 
-### [Cours VXLAN](https://youtube.com/playlist?list=PLmVr8r1kmMm1LucO47Ch5CDJWgBb2X6YE&si=pRrnY0TlgMFllbFj)
+### [Intro: Cours VXLAN](https://youtube.com/playlist?list=PLmVr8r1kmMm1LucO47Ch5CDJWgBb2X6YE&si=pRrnY0TlgMFllbFj)
+
+### Step 0: Understand what you're building
+
+The physical topology is one flat network `routeur_tat-nguy-1 eth0` ↔ `Switch_tat-nguy` ↔ `routeur_tat-nguy-2 eth0`.
+This is the underlay, meaning ordianry IP connectivity between the two routeurs.
+
+On top of it you build an overlay: a virtual Layer 2 segment (VXLAN, VNI 10) that makes `host_tat-nguy-1` and `host_tat-nguy-2` behave as if they were plugged into the same switch, even though routers sit between them.
+
+Key terms to know:
+
+- VTEP (VXLAN Tunnel End Point): each router. It encapsulates the host's Ethernet frame inside UDP/IP, sends it to the other VTEP, and decapsulates frames it receives.
+- VNI (VXLAN Network Identifier): the 24-bit segment ID, here 10. VLANs only allow about 4096 IDs, while VXLAN allows about 16 million.
+- UDP port 4789: the IANA-standard VXLAN port. Linux defaults to 8472 for legacy reasons, so always set `dstport 4789` explicitly.
+- Bridge (`br0`): a software switch inside each router. It joins the host-facing port (`eth1`) and the tunnel interface (`vxlan10`), so frames from the host go into the tunnel and vice versa. It also learns MACs, which is what `brctl showmacs` displays.
+- BUM traffic (Broadcast, Unknown unicast, Multicast): ARP requests, for example. The VTEP has to know where to send these.
+  - Static mode: you hardcode the remote VTEP IP (`remote 10.1.1.2`).
+  - Multicast mode: VTEPs join a multicast group (`239.1.1.1`) using IGMP, and BUM traffic is sent to the group. Any VTEP in the group receives it, with no need to list peers. This scales better than static mode.
+- Encapsulation overhead is about 50 bytes (outer Ethernet 14 + IP 20 + UDP 8 + VXLAN 8). That's why `vxlan10` shows MTU 1450 in the subject's screenshots.
+
+### Step 1: Addressing plan
+
+| Device	| Interface |	IP  |	Role  |
+|---------|-----------|-----|-------|
+| routeur_tat-nguy-1	| eth0  |	10.1.1.1/24 |	underlay  |
+| routeur_tat-nguy-1  |	eth1  | none  |	bridged to host |
+| routeur_tat-nguy-2  | eth0  | 10.1.1.2/24 |	underlay
+| routeur_tat-nguy-2  |	eth1  |	none  |	bridged to host |
+| host_tat-nguy-1 |	eth1  |	30.1.1.1/24 |	overlay |
+| host_tat-nguy-2 |	eth1  |	30.1.1.2/24 |	overlay |
+
+The hosts sit in the same subnet with no gateway. That proves the traffic is pure Layer 2 across the tunnel.
+
+### Step 2: Build the topology in GNS3
+
+1. Create a new project named `P2`.
+
+2. Drag in two routers (your FRR image), two hosts (your Alpine/busybox image), and a built-in Ethernet switch. The switch needs no configuration.
+
+3. Rename them `routeur_tat-nguy-1`, `routeur_tat-nguy-2`, `host_tat-nguy-1`, `host_tat-nguy-2`, and `Switch_tat-nguy`.
+
+4. Make sure each Docker node has enough adapters. Right-click → Configure → Adapters: set `4` for the routers, and `2` for the hosts if you use `eth1`.
+
+5. Cable it like the subject diagram:
+  - `routeur_tat-nguy-1 eth0` → `Switch_tat-nguy e0`
+  - `routeur_tat-nguy-2 eth0` → `Switch_tat-nguy e1`
+  - `routeur_tat-nguy-1 eth1` → `host_tat-nguy-1 eth1`
+  - `routeur_tat-nguy-2 eth1` → `host_tat-nguy-2 eth1`
+
+6. Start all nodes and open their consoles.
+
+```sh
+
+# /opt/homebrew/bin/telnet {IP address of router} {port}
+telnet 192.168.64.13 5013
+```
+
+### Step 3: Static mode configuration
+
+`routeur_tat-nguy-1` (save as `P2/_tat-nguy-1_s`):
+
+```sh
+# Underlay: give eth0 an IP to reach the other VTEP
+ip addr add 10.1.1.1/24 dev eth0
+ip link set eth0 up
+
+# VXLAN interface, VNI 10, unicast tunnel to the remote VTEP
+ip link add name vxlan10 type vxlan id 10 dev eth0 local 10.1.1.1 remote 10.1.1.2 dstport 4789
+ip link set vxlan10 up
+
+# Bridge joining host-facing port and tunnel
+ip link add br0 type bridge
+ip link set br0 up
+ip link set eth1 up
+brctl addif br0 eth1
+brctl addif br0 vxlan10
+```
+
+`routeur_tat-nguy-2` (save as `P2/_tat-nguy-2_s`): the same script with `10.1.1.2` as the `eth0` address and `local`, and remote `10.1.1.1`.
+
+```sh
+# Underlay: give eth0 an IP to reach the other VTEP
+ip addr add 10.1.1.2/24 dev eth0
+ip link set eth0 up
+
+# VXLAN interface, VNI 10, unicast tunnel to the remote VTEP
+ip link add name vxlan10 type vxlan id 10 dev eth0 local 10.1.1.2 remote 10.1.1.1 dstport 4789
+ip link set vxlan10 up
+
+# Bridge joining host-facing port and tunnel
+ip link add br0 type bridge
+ip link set br0 up
+ip link set eth1 up
+brctl addif br0 eth1
+brctl addif br0 vxlan10
+```
+
+`host_tat-nguy-1` (save as `P2/_tat-nguy-1_host`):
+
+```sh
+ip addr add 30.1.1.1/24 dev eth1
+ip link set eth1 up
+```
+
+`host_tat-nguy-2` (save as `P2/_tat-nguy-2_host`): the same, with `30.1.1.2/24`.
+
+```sh
+ip addr add 30.1.1.2/24 dev eth1
+ip link set eth1 up
+```
+
+#### Test static mode
+
+Run these checks in order:
+
+1. From `routeur_tat-nguy-1`, run `ping 10.1.1.2`. If this fails, stop and fix it first. The underlay must work before the overlay can.
+
+2. From `host_tat-nguy-1`, run `ping 30.1.1.2`. You should get replies.
+
+3. In GNS3, right-click the link `routeur_tat-nguy-1 eth0 ↔ Switch_tat-nguy` → Start capture. In Wireshark you should see:
+  - an outer IP header `10.1.1.1 → 10.1.1.2`
+  - UDP destination port 4789
+  - a VXLAN header showing VNI 10
+  - an inner frame carrying ICMP `30.1.1.1 → 30.1.1.2`
+This matches the subject screenshot on page 8.
+
+If Wireshark shows the packet as plain UDP, right-click it → Decode As → UDP 4789 → VXLAN.
+
+### Step 4: Dynamic multicast mode
+
+Only the router's VXLAN line changes.
+
+`routeur_tat-nguy-1` (save as `P2/_tat-nguy-1_g`):
+
+```sh
+# Remove old interface first
+ip link del vxlan10
+ip link del br0
+
+ip addr add 10.1.1.1/24 dev eth0
+ip link set eth0 up
+
+# Multicast group instead of a fixed remote peer
+ip link add name vxlan10 type vxlan id 10 dev eth0 group 239.1.1.1 dstport 4789
+ip link set vxlan10 up
+
+ip link add br0 type bridge
+ip link set br0 up
+ip link set eth1 up
+brctl addif br0 eth1
+brctl addif br0 vxlan10
+```
+
+`routeur_tat-nguy-2` (save as `P2/_tat-nguy-2_g`): the same script with `10.1.1.2/24`.
+
+```sh
+# Remove old interface first
+ip link del vxlan10
+ip link del br0
+
+ip addr add 10.1.1.2/24 dev eth0
+ip link set eth0 up
+
+# Multicast group instead of a fixed remote peer
+ip link add name vxlan10 type vxlan id 10 dev eth0 group 239.1.1.1 dstport 4789
+ip link set vxlan10 up
+
+ip link add br0 type bridge
+ip link set br0 up
+ip link set eth1 up
+brctl addif br0 eth1
+brctl addif br0 vxlan10
+```
+
+The `dev eth0` part is mandatory in multicast mode. It tells the kernel which interface should join the IGMP group.
+
+#### Test multicast mode
+
+1. From `host_tat-nguy-1`, run `ping 30.1.1.2` again.
+
+2. Capture on the underlay link. The first ARP request now goes to destination `239.1.1.1`, with a multicast MAC starting `01:00:5e:...`. After both sides learn each other, the ICMP replies go unicast between `10.1.1.1` and `10.1.1.2`. That behavior is called flood-and-learn, and it matches the subject screenshot on page 9.
+
+3. On each router, run `ip -d link show vxlan10`. The output should include `vxlan id 10 group 239.1.1.1 dev eth0 ... dstport 4789`.
+
+4. On each router, run `brctl showmacs br0` (or `bridge fdb show br br0`). The table lists:
+  - local MACs (`is local? yes`): the bridge's own ports
+  - learned remote MACs (`no`) with an ageing timer
+The remote host's MAC should appear behind the `vxlan10` port number.
+
+5. Optionally run `bridge fdb show dev vxlan10`. It shows which remote VTEP IP each MAC was learned from, which is a good thing to show at defense.
+
+### Step 5: Making configs reproducible
+
+Containers in GNS3 lose runtime config when stopped, so keep your scripts as the source of truth. You have two practical options:
+
+- Paste each script into the node console when you demo. It's simple and the evaluator sees exactly what happens.
+
+- Push them from the VM:
+
+```sh
+docker exec -i <container_id> sh < P2/_tat-nguy-1_s
+```
+
+Use `docker ps` to find which container belongs to which GNS3 node. The hostname matches the node name.
+
+Add comments to every file, as the subject asks. The comments in the scripts above are a good baseline.
+
+### Step 6: Export and submit
+
+1. In GNS3, go to File → Export portable project. Choose Zip compression and check Include base images. Save it as `P2/P2.gns3project`.
+
+2. Check the export with file `P2/P2.gns3project`. It should say "Zip archive data".
+
+3. Your P2 folder should contain:
+
+```
+   P2/P2.gns3project
+   P2/_tat-nguy-1_host   P2/_tat-nguy-2_host
+   P2/_tat-nguy-1_s      P2/_tat-nguy-2_s      # static mode
+   P2/_tat-nguy-1_g      P2/_tat-nguy-2_g      # group / multicast mode
+```
+
+4. Commit and push.
+
+### Common pitfalls
+
+- Host ping fails in both modes. Check the underlay ping first. Then check that every interface is `up`, including `eth1`, `br0`, and `vxlan10`. Downed interfaces are the number one cause.
+
+- Wireshark shows no VXLAN. You probably forgot `dstport 4789`, so the traffic uses port 8472.
+
+- Multicast mode never learns. You probably left out `dev eth0`, or the old static `vxlan10` still exists. Check with `ip -d link show`.
+
+- Evaluator asks why routers have no IP on `eth1`. Because it's a bridge port. The router forwards Layer 2 frames there and doesn't route them.
+
+- Evaluator asks why the hosts need no gateway. Because both hosts are in the same broadcast domain, stretched across the tunnel.
+
+Once this works, Part 3 reuses this same VXLAN 10 and bridge setup. It replaces flood-and-learn with BGP EVPN, which advertises MACs through type 2 routes and VTEPs through type 3 routes, so keep these scripts handy.
 
 ## Part 3: Discovering BGP with EVPN
 
@@ -269,6 +531,6 @@ write memory
 
 ### Docker commands
 
-- Build image: `docker build -t my-username/my-image .`
+- Build Docker image: `docker build -t my-username/my-image .`
 
 ```

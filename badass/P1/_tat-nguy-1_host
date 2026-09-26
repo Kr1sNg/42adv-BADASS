@@ -1,0 +1,15 @@
+# host-tat-nguy-1 - network configuration (GNS3 "Edit config")
+# GNS3 writes this file to /etc/network/interfaces inside the
+# container and applies it at every boot with "ifup -a".
+# The Docker image itself contains NO IP address (subject rule):
+# the address exists only at project level, in this file.
+
+# Bring eth0 up automatically at boot
+auto eth0
+
+# eth0 uses IPv4 with a fixed (static) address, no DHCP
+iface eth0 inet static
+    # Host address in the 192.168.0.0/24 network
+    address 192.168.0.2
+    # /24 mask: 192.168.0.1-254 reachable directly, no gateway needed
+    netmask 255.255.255.0
