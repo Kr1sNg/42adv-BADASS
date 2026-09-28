@@ -1,4 +1,7 @@
-# host-tat-nguy-1 - network configuration (GNS3 "Edit config")
+# =====================================================================
+# host-tat-nguy-1 - Part 1
+# =====================================================================
+# Network configuration (GNS3 "Edit config")
 # GNS3 writes this file to /etc/network/interfaces inside the
 # container and applies it at every boot with "ifup -a".
 # The Docker image itself contains NO IP address (subject rule):
