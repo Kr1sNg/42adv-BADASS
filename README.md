@@ -287,7 +287,96 @@ write memory
 
 ## Part 2: Discovering a VXLAN
 
-### [Intro: Cours VXLAN](https://youtube.com/playlist?list=PLmVr8r1kmMm1LucO47Ch5CDJWgBb2X6YE&si=pRrnY0TlgMFllbFj)
+### Intro
+
+[Intro: Cours VXLAN](https://youtube.com/playlist?list=PLmVr8r1kmMm1LucO47Ch5CDJWgBb2X6YE&si=pRrnY0TlgMFllbFj)
+
+#### 1. Two kinds of addresses
+
+- MAC address (Layer 2, Ethernet), for example `62:b7:1f:a6:5a:34`. It's burned into the network card and used to deliver frames inside one local network, meaning between machines on the same switch.
+
+- IP address (Layer 3), for example `30.1.1.1`. It's a logical address, and routers use it to move packets between networks.
+
+When `host_tat-nguy-1` wants to reach `30.1.1.2`, it looks at its netmask (`/24`) and concludes that `30.1.1.2` is in its own network. So it doesn't need a router. It only needs the destination's MAC address, and it finds it by shouting an `ARP request` (Address Resolution Protocol Request) to everyone: "Who has 30.1.1.2? Tell 30.1.1.1" This shout is a `broadcast`, send to MAC `ff:ff:ff:ff:ff:ff`, which every machine on the local network receives.
+
+The catch: the two hosts are **not** on the same local network. Two routers and a switch separate them, and a broadcast never crosses a router. Without help, the ARP never reaches host 2 and the ping fails. That's the problem VXLAN solves.
+
+#### 2. The idea of VXLAN: an envelope inside an envelope
+
+Picture the host's Ethernet frame as a letter. VXLAN puts that whole letter, MAC addresses included, inside a second envelope addressed from router to router:
+
+```
+┌────────────────────────── outer envelope (underlay) ──────────────────────────┐
+│ Ethernet | IP 10.1.1.1 → 10.1.1.2 | UDP port 4789 | VXLAN VNI 10 |            │
+│   ┌──────────────── inner letter (overlay, untouched) ────────────────┐       │
+│   │ Ethernet MAC host1 → MAC host2 | IP 30.1.1.1 → 30.1.1.2 | ping    │       │
+│   └───────────────────────────────────────────────────────────────────┘       │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+This is exactly what you'll see in Wireshark. It creates two separate networks, and you need these terms at the defense:
+
+- **Underlay** (`10.1.1.0/24`): the real network between the routers, through the switch. It carries the envelopes.
+- **Overlay** (`30.1.1.0/24`): the virtual network the hosts believe they're on. The hosts never see `10.x`
+
+The other key terms:
+
+- VTEP (VXLAN Tunnel End Point): whatever puts letters into envelopes and takes them out. Each router is one, through its `vxlan10` interface.
+- VNI (VXLAN Network Identifier) `10`: a number written on the envelope that says which virtual network the letter belongs to. One underlay can carry many virtual networks, up to about 16 million VNIs (compared with 4096 VLANs), and each stays separate.
+- UDP port `4789`: the official port for VXLAN. The envelope is a normal UDP packet, so any IP network can carry it.
+
+#### 3. The bridge: a switchc inside the router
+
+A **bridge** (`br0`) is a software switch. In each router, it has two ports:
+
+- `eth1`, the cable to the host (`host_tat-nguy-1` and `host_tat-nguy-2`)
+- `vxlan10`, the tunnel to the `switch_tat-nguy` and to other router
+
+Like any switch, it forwards frames between its ports and learns MAC addresses, remembering "MAC X was seen on port Y". That table is what `brctl showmacs br0` displays.
+
+So each router behaves like half of a switch, and the tunnel is the cable joining the two halves. From the host's POV, they're plugged into one switch.
+
+That's also why `eth1` has no IP. It's a switch port, working only at Layer 2, and router doesn't route anything here.
+
+#### 4. The journey of one ping
+
+1. Host 1 broadcasts an ARP request: "Who has 30.1.1.2?"
+
+2. Router 1 receives it on `eth1`. The bridge floods the broadcast to its other port, `vxlan10`, and learns "Host 1's MAC is behind `eth1`".
+
+3. `vxlan10` wraps the frame in an envelops `10.1.1.1 -> 10.1.1.2`, UDP 4789, VNI 10, and sends it out `eth0`.
+
+4. The switch delivers the envelope to Router 2, which recognizes UDP 4789 with VNI 10 and unwraps it. Its bridge learns "Host's 1 MAC is behind `vxlan10`" and floods the frame out `eth1`.
+
+5. Host 2 receives a normal ARP request and replies with its MAC. The reply travels back the same way.
+
+6. Host 1 now knows Host 2's MAC and sends the ping, which follows the same path.
+
+Point out the TTL in the ping output: it stays at `64`, the starting value. Every router hop decreases TTL, so an unchanged TTL proves the packet was never routed. It crossed at Layer 2, as if through a single switch.
+
+#### 5. Static (Unknown Unicast) vs Dynamic Multicast
+
+Both modes differ only in how the VTEP handles Broadcast, Unknown unicast, Multicast (BUM) traffic, frames it doesn't know where to send, like that first ARP.
+
+- **Static** (`remote 10.1.1.2`): you write the other VTEP's address by hand, and all BUM traffic goes there. It's simple, but with 50 routers each one would need 49 peers listed manually, so it doesn't scale.
+  - Unknown Unicast: Frames directed to a specific MAC address that the switch or VTEP does not currently have in its forwarding or MAC address table.
+
+- **Multicast** (`group 239.1.1.1`): nobody is listed. Each VTEP joins a multicast group on `eth0` using the IGMP protocol, and BUM traffic is sent to the group, so every member receives it. Adding a VTEP just means joining the group.
+  - Multicast: Traffic sent by a single source to a defined logical group of subscribing recipient devices.
+
+In both modes, once the reply comes back, the VTEP records which MAC is behind which VTEP IP, and later frames go directly unicast. This is called flood-and-learn. You can show the learned entries with:
+
+```bash
+bridge fdb show dev vxlan10
+```
+
+In Wireshark, the difference shows on the first ARP only:
+
+- Static mode: the outer destination is `10.1.1.2`
+- Multicast mode: the outer destination is `239.1.1.1`, with a MAC starting `01:00:5e`
+
+Otherwise, Broadcast: Layer 2 frames sent to a destination address of all ones (`FF:FF:FF:FF:FF:FF`), destined for every device on the local network segment (e.g., ARP requests).
+
 
 ### Step 0: Understand what you're building
 
@@ -298,9 +387,6 @@ On top of it you build an overlay: a virtual Layer 2 segment (VXLAN, VNI 10) tha
 
 Key terms to know:
 
-- VTEP (VXLAN Tunnel End Point): each router. It encapsulates the host's Ethernet frame inside UDP/IP, sends it to the other VTEP, and decapsulates frames it receives.
-- VNI (VXLAN Network Identifier): the 24-bit segment ID, here 10. VLANs only allow about 4096 IDs, while VXLAN allows about 16 million.
-- UDP port 4789: the IANA-standard VXLAN port. Linux defaults to 8472 for legacy reasons, so always set `dstport 4789` explicitly.
 - Bridge (`br0`): a software switch inside each router. It joins the host-facing port (`eth1`) and the tunnel interface (`vxlan10`), so frames from the host go into the tunnel and vice versa. It also learns MACs, which is what `brctl showmacs` displays.
 - BUM traffic (Broadcast, Unknown unicast, Multicast): ARP requests, for example. The VTEP has to know where to send these.
   - Static mode: you hardcode the remote VTEP IP (`remote 10.1.1.2`).
@@ -387,15 +473,15 @@ brctl addif br0 vxlan10
 `host_tat-nguy-1` (save as `P2/_tat-nguy-1_host`):
 
 ```sh
-ip addr add 30.1.1.1/24 dev eth1
-ip link set eth1 up
+ip addr add 30.1.1.1/24 dev eth0
+ip link set eth0 up
 ```
 
 `host_tat-nguy-2` (save as `P2/_tat-nguy-2_host`): the same, with `30.1.1.2/24`.
 
 ```sh
-ip addr add 30.1.1.2/24 dev eth1
-ip link set eth1 up
+ip addr add 30.1.1.2/24 dev eth0
+ip link set eth0 up
 ```
 
 #### Test static mode
