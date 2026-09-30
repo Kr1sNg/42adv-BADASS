@@ -1,0 +1,38 @@
+#!/bin/sh
+# tat-nguy-3 : VTEP leaf for VXLAN 10 (BADASS P3)
+
+# ---- Linux side: bridge + VXLAN tunnel ----
+ip link add br0 type bridge                  # virtual switch
+ip link set br0 up
+ip link add vxlan10 type vxlan id 10 dstport 4789 local 1.1.1.3 nolearning
+ip link set vxlan10 master br0               # tunnel into the bridge
+ip link set vxlan10 up
+ip link set eth0 master br0                  # host port into the bridge
+ip link set eth0 up
+
+# ---- FRR: underlay (OSPF) + control plane (BGP EVPN) ----
+vtysh << EOF
+conf t
+hostname tat-nguy-2
+no ipv6 forwarding
+interface eth0
+ ip address 10.1.1.2/30
+exit
+interface lo
+ ip address 1.1.1.2/32
+exit
+router bgp 1
+ neighbor 1.1.1.1 remote-as 1
+ neighbor 1.1.1.1 update-source lo
+ address-family l2vpn evpn
+  neighbor 1.1.1.1 activate
+  advertise-all-vni
+ exit-address-family
+exit
+router ospf
+ network 1.1.1.2/32 area 0
+ network 10.1.1.0/30 area 0
+exit
+end
+write memory
+EOF

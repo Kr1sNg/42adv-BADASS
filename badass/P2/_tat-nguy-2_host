@@ -11,11 +11,11 @@
 # their frames through the VXLAN tunnel transparently.
 # =====================================================================
 
-# Bring eth0 up automatically at boot
-auto eth0
-# eth0 = the port cabled to routeur_tat-nguy-2 eth1 in GNS3
+# Bring eth1 up automatically at boot
+auto eth1
+# eth1 = the port cabled to routeur_tat-nguy-2 eth1 in GNS3
 # IPv4, fixed (static) address, no DHCP
-iface eth0 inet static
+iface eth1 inet static
     # Host address in the overlay network 30.1.1.0/24
     address 30.1.1.2
     # /24 mask: the other host (30.1.1.1) is in the same network,

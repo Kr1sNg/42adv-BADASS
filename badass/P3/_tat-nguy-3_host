@@ -1,0 +1,6 @@
+# host_tat-nguy-3: end device plugged into leaf tat-nguy-4
+# All hosts share 20.1.1.0/24 because VXLAN 10 makes them one L2 LAN
+auto eth0
+iface eth0 inet static
+    address 20.1.1.3
+    netmask 255.255.255.0

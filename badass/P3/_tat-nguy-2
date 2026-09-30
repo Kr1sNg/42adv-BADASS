@@ -1,0 +1,48 @@
+#!/bin/sh
+# tat-nguy-2 : VTEP leaf for VXLAN 10 (BADASS P3)
+
+# ---- Linux side: bridge + VXLAN tunnel ----
+# Create a virtual switch named br0 inside router.
+# Anything plugged into it can exchange Ethernet frames, just like ports on a real switch
+ip link add br0 type bridge
+ip link set br0 up
+
+# Create tunnel interface
+ip link add vxlan10 type vxlan id 10 dstport 4789 local 1.1.1.2 nolearning
+
+# Plug the tunnel into the bridge. From now on, a frame that enters br0 and must reach a remote host goes into the tunnel
+ip link set vxlan10 master br0
+# = `brctl addif br0 vxlan10`
+ip link set vxlan10 up
+
+# Plugs the host-facing port into the same bridge. The local host and tunnel are now on the same virtual switch
+ip link set eth1 master br0
+# = `brctl addif br0 eth1`
+ip link set eth1 up
+
+# ---- FRR: underlay (OSPF) + control plane (BGP EVPN) ----
+vtysh << EOF
+conf t
+hostname tat-nguy-2
+no ipv6 forwarding
+interface eth0
+ ip address 10.1.1.2/30
+exit
+interface lo
+ ip address 1.1.1.2/32
+exit
+router bgp 1
+ neighbor 1.1.1.1 remote-as 1
+ neighbor 1.1.1.1 update-source lo
+ address-family l2vpn evpn
+  neighbor 1.1.1.1 activate
+  advertise-all-vni
+ exit-address-family
+exit
+router ospf
+ network 1.1.1.2/32 area 0
+ network 10.1.1.0/30 area 0
+exit
+end
+write memory
+EOF

@@ -1,6 +1,6 @@
 # BGP At Doors of Autonomous Systems is Simple
 
-The purpose of this project is to deepen the knowledge of `NetPractice` by simulating several networks (VXLAN+BGP-EVPN) in GNS3.
+The purpose of this project is to deepen the knowledge of `NetPractice` by simulating several networks (VXLAN + BGP-EVPN) in GNS3.
 
 ## Introduction
 
@@ -123,7 +123,17 @@ A VLAN splits a single physical network switch into multiple virtual switches.
 - Connected to the Underlay Network
 - Creates tunneling mechanism for VXLAN
 
+### BGP EVPN (Border Gateway Protocol - Ethernet Virtual Private Network)
 
+RFC 7432 defines BGP EVPN (Ethernet Virtual Private Network), a standards-based control plane protocol that uses Multiprotectocol Border Gateway Protocol (MP-BGP) to advertise Layer 2 MAC addresses and Layer 3 IP bindings.
+
+RFC 7432 introduces specific EVPN Route Types encapsulated in MP-BGP Network Layer Reachability Information (NLRI):
+
+- Type 1 (Ethernet Auto-Discovery Route): Used for fast convergence and aliasing on multi-homed Ethernet segments.
+- Type 2 (MAC/IP Advertisement Route): Advertises host MAC addresses and optional IP address bindings.
+- Type 3 (Inclusive Multicast Ethernet Tag Route): Builds the replication/flooding tree for BUM traffic across PEs.
+- Type 4 (Ethernet Segment Route): Discovers other PEs attached to the same multi-homed Ethernet segment and assists in DF election.
+- Type 5 (IP Prefix Route): Added by later extensions to advertise routed IP prefixes instead of host-specific MAC/IP routes.
 
 ---
 
@@ -473,15 +483,15 @@ brctl addif br0 vxlan10
 `host_tat-nguy-1` (save as `P2/_tat-nguy-1_host`):
 
 ```sh
-ip addr add 30.1.1.1/24 dev eth0
-ip link set eth0 up
+ip addr add 30.1.1.1/24 dev eth1
+ip link set eth1 up
 ```
 
 `host_tat-nguy-2` (save as `P2/_tat-nguy-2_host`): the same, with `30.1.1.2/24`.
 
 ```sh
-ip addr add 30.1.1.2/24 dev eth0
-ip link set eth0 up
+ip addr add 30.1.1.2/24 dev eth1
+ip link set eth1 up
 ```
 
 #### Test static mode
@@ -547,7 +557,7 @@ brctl addif br0 eth1
 brctl addif br0 vxlan10
 ```
 
-The `dev eth0` part is mandatory in multicast mode. It tells the kernel which interface should join the IGMP group.
+The `dev eth0` part is mandatory in multicast mode. It tells the kernel which interface (here `eth0`) should join the IGMP group.
 
 #### Test multicast mode
 
@@ -613,10 +623,367 @@ Once this works, Part 3 reuses this same VXLAN 10 and bridge setup. It replaces 
 
 ## Part 3: Discovering BGP with EVPN
 
+Part 2 found remote MACs through static peers or a multicast group. In this Part 3, BGP tells every router which MAC lives behind which router.
+
+### Step 0: The concepts
+
+#### Underlay vs Overlay
+
+Every **VXLAN** network has 2 layers:
+- **The underlay** is the real IP network between routers. Its only job is to let any router reach any other router's IP. In this part 3, routers are connected with `/30` links (4 total IP addresses), and OSPF (Open Shortest Path First) builds this network.
+
+- **The overlay** is the virtual Layer 2 network that the hosts see. Hosts think they're all plugged into the same switch (`VNI 10`). In reality, their Ethernet frames are wrapped inside UDP packets (`port 4789`) and carried across the underlay.
+
+A router that wraps and unwraps these frames is a VTEP. Three leaves in this Part 3 are VTEPs. The Route Reflector (RR) is not a VTEP; it only forwards IP packets and relays BGP information.
+
+#### Loopback addresses (lo)
+
+The `lo` (loopback) interface is a virtual network device built into your operating system that allows your computer to communicate directly with itself.
+
+Each router gets a `/32` addresson its `lo` interface: `1.1.1.1` through `1.1.1.4`. A loopback never goes down as long as the router is alive, so it's the stable identify of the router. BGP sessions and VXLAN tunnels use loopbacks instead of physical link IPs. OSPF advertises the loopbacks so every router can reach every other router's loopback. That's why the subject's `show ip route` screenshot shows `1.1.1.x/32` routes learned via OSPF (`0>*`).
+
+#### OSPF (Open Shortest Path First)
+
+OSPF is an IGP (Interior Gateway Protocol). Routers in the same organization run it to discover each other automatically and compute the shortest paths. Routers send "Hello" packets to their neighbors, exchange their link information, and each one builds a full map of the network. You don't write any static routes. Everything here is in **area 0**, the backbone area.
+
+#### BGP, AS and iBGP
+
+BGP is the routing protocol of the Internet. Routers exchange "I can reach X" messages over TCP port 179. A group of routers under one administration is an Autonomous System (AS). All your routers are in **AS 1**. When BGP neighbours are in the same AS, the session is called **iBGP**.
+
+iBGP has a rule: a route learned from one iBGP peer is not passed on to another iBGP peer. The rule prevents loops. The consequence is that normally every router would need a session with every other router (a full mesh). With N routers, that's Nx(N-1)/2 sessions, which doesn't scale.
+
+#### Route Reflector (RR)
+
+A RR is an exception to that rule. The leaves peer only with the RR, and the RR reflects each leaf's routes to all the other leaves. So you need 3 sessions instead of a full mesh. The leaves are the RR's route-reflector clients.
+
+"Dynamic relationships" in the subject means the RR doesn't list each leaf by IP. It uses `bgp listen range 1.1.1.0/29` and accepts any router from that range that connects. The RR is the "controller" of the data center.
+
+#### MP-BGP and EVPN
+
+Original BGP only carried IPv4 prefixes. MP-BGP (Multi-Protocol BGP) adds address families, so the same BGP session can carry other kinds of information. EVPN is the address familly `12vpn evpn`. Instead of IP prefixes, it carries MAC addressses and VTEP information.
+
+The subject shows 2 EVPN route types:
+
+| Type | Name | Meaning | When it appears |
+|------|------|---------|-----------------|
+| Type 3 | Inclusive Multicast Ethernet Tag | "I am VTEP 1.1.1.2 and I have VNI 10. Send me broadcast/unknown traffic for VNI 10" | As soon as the VNI is configured, even with no hosts |
+| Type 2 | MAC/IP Advertisement | "MAC 62:b7:1f:a6:5a:34 is behind me (1.1.1.2) in VNI 10" | When a host sends a frame and the leaf learns its MAC |
+
+Type 3 routes replace Part 2's multicast group. Each VTEP learns the list of other VTEPs from BGP and sends a unicast copy of broadcast traffic (like ARP) to each one. This is called ingress replication.
+
+Type 2 routes replace Part 2's food-and-learn. MACs are learned by the control plane (BGP) instead of by watching data traffic.
+
+#### Info in `show bgp 12vpn evpn`
+
+- RD (Route Distinguisher), eg `1.1.1.2:2`, makes each route unique, so two leaves advertising similar things don't collide.
+- RT (Route Target), eg `RT:1:10`, means "AS 1, VNI 10". A leaf imports routes whose RT matches its VNI. FRR builds the RD and RT automatically.
+- `ET:8` means "encapsulation type 8 = VXLAN"
+- `i` means the route was learned via iBGP.
+- `32768` is the local weight, which marks a route this router originated itself.
+
+### Step 1: The addressing plan
+
+| Node | Interface | Address | Connected to |
+|------|-----------|---------|--------------|
+| host_tat-nguy-1 | eth1 | 20.0.0.1/24 | _tat-nguy-2 |
+| host_tat-nguy-2 | eth0 | 20.0.0.2/24 | _tat-nguy-3 |
+| host_tat-nguy-3 | eth0 | 20.0.0.3/24 | _tat-nguy-4 |
+| _tat-nguy-1 (RR) | lo   | 1.1.1.1/32  | none        |
+|                  | eth0 | 10.1.1.1/30 | _tat-nguy-2 |
+|                  | eth1 | 10.1.1.5/30 | _tat-nguy-3 |
+|                  | eth2 | 10.1.1.9/30 | _tat-nguy-4 |
+| _tat-nguy-2 (leaf) | lo   | 1.1.1.2/32      | none                 |
+|                    | eth0 | 10.1.1.2/30     | RR eth0              |
+|                    | eth1 | (no IP, in br0) | host_tat-nguy-1 eth1 |
+| _tat-nguy-3 (leaf) | lo   | 1.1.1.3/32      | none                 |
+|                    | eth0 | (no IP, in br0) | host_tat-nguy-2 eth0 |
+|                    | eth1 | 10.1.1.6/30     | RR eth1              |
+| _tat-nguy-4 (leaf) | lo   | 1.1.1.4/32      | none                 |
+|                    | eth0 | (no IP, in br0) | host_tat-nguy-3 eth0 |
+|                    | eth2 | 10.1.1.10/30    | RR eth2              |
+
+- A `/30` subnet has exactly 2 usable addresses, which is perfect for a point-to-point link.
+- The hosts share one `/24` subnet because the overlay makes them look like they're on the same LAN, even though they're far apart physically.
+- The leaves's host-facing ports have no IP. They are pure Layer 2 bridge ports.
+
+### Step 2: Configure the hosts
+
+For `host_tat-nguy-1`:
+
+```
+# host_tat-nguy-1: end device plugged into leaf _tat-nguy-2
+# All hosts share 20.1.1.0/24 because VXLAN 10 makes them one L2 LAN
+auto eth1
+iface eth1 inet static
+    address 20.1.1.1
+    netmask 255.255.255.0
+```
+
+For `host_tat-nguy-2`:
+
+```
+# host_tat-nguy-2: end device plugged into leaf tat-nguy-3
+# All hosts share 20.1.1.0/24 because VXLAN 10 makes them one L2 LAN
+auto eth0
+iface eth0 inet static
+    address 20.1.1.2
+    netmask 255.255.255.0
+```
+
+For `host_tat-nguy-3`:
+
+```
+# host_tat-nguy-3: end device plugged into leaf tat-nguy-4
+# All hosts share 20.1.1.0/24 because VXLAN 10 makes them one L2 LAN
+auto eth0
+iface eth0 inet static
+    address 20.1.1.3
+    netmask 255.255.255.0
+```
+
+Version using command terminal (for `host_tat-nguy-1`):
+
+```sh
+# Gives the interface eth1 the IP 20.1.1.1.
+# The /24 tells host that everything from 20.1.1.0 to .255 is on the same LAN, so it will send ARP requests directly for those addresses instead of looking for a gateway. 
+ip addr add 20.1.1.1/24 dev eth1
+
+# Turns the interface eth1 on.
+# A Linux interface is down by default and can't send or receive anything until we put it up
+ip link set eth1 up
+```
+
+### Step 3: Configure the leaves on Linux side (VXLAN 2, 3, 4)
+
+There's 2 side to config for leaves routers 2, 3, 4:
+  - Linux side (The kernel's devices: br0, vxlan10, ports plugged into the bridge)
+  - FRR side (inside vtysh for software interface IPs, OSPF, BGP, EVPN)
+
+- Leaf `_tat-nguy-2` (copy - paste to Termial)
+
+```sh
+# Create a virtual switch named br0 inside router.
+# Anything plugged into it can exchange Ethernet frames, just like ports on a real switch
+ip link add br0 type bridge
+ip link set br0 up
+
+# Create tunnel interface
+ip link add vxlan10 type vxlan id 10 dstport 4789 local 1.1.1.2 nolearning
+
+# Plug the tunnel into the bridge. From now on, a frame that enters br0 and must reach a remote host goes into the tunnel
+ip link set vxlan10 master br0
+# = `brctl addif br0 vxlan10`
+ip link set vxlan10 up
+
+# Plugs the host-facing port into the same bridge. The local host and tunnel are now on the same virtual switch
+ip link set eth1 master br0
+# = `brctl addif br0 eth1`
+ip link set eth1 up
+```
+
+- Leaf `_tat-nguy-3`
+
+```sh
+ip link add br0 type bridge
+ip link set br0 up
+ip link add vxlan10 type vxlan id 10 dstport 4789 local 1.1.1.3 nolearning
+ip link set vxlan10 master br0
+ip link set vxlan10 up
+ip link set eth0 master br0
+ip link set eth0 up
+```
+
+- Leaf `_tat-nguy-4`
+
+```sh
+ip link add br0 type bridge
+ip link set br0 up
+ip link add vxlan10 type vxlan id 10 dstport 4789 local 1.1.1.4 nolearning
+ip link set vxlan10 master br0
+ip link set vxlan10 up
+ip link set eth0 master br0
+ip link set eth0 up
+```
+
+Check the work with 
+
+```sh
+ip -d link show vxlan10
+bridge link
+```
+
+### Step 4: Configure Route Reflector (RR - 1)
+
+- On `_tat-nguy-1`:
+
+```vtysh
+configure terminal
+  no ipv6 forwarding
+  interface lo
+    ip address 1.1.1.1/32
+  exit
+  interface eth0
+    ip address 10.1.1.1/30
+  exit
+  interface eth1
+    ip address 10.1.1.5/30
+  exit
+  interface eth2
+    ip address 10.1.1.9/30
+  exit
+
+  router bgp 1
+    neighbor ibgp peer-group
+    neighbor ibgp remote-as 1
+    neighbor ibgp update-source lo
+    bgp listen range 1.1.1.0/29 peer-group ibgp
+    address-family l2vpn evpn
+      neighbor ibgp activate
+      neighbor ibgp route-reflector-client
+    exit-address-family
+  exit
+
+  router ospf
+    network 1.1.1.1/32 area 0
+    network 10.1.1.0/30 area 0
+    network 10.1.1.4/30 area 0
+    network 10.1.1.8/30 area 0
+  exit
+end
+write memory
+
+show ip route
+```
+
+### Step 5: Configure the leaves on FRR side (vtysh 2, 3, 4)
+
+- On `_tat-nguy-2`:
+
+```vtysh
+configure terminal
+  no ipv6 forwarding
+  interface lo
+    ip address 1.1.1.2/32
+    no shutdown
+  exit
+  interface eth0
+    ip address 10.1.1.2/30
+  exit
+
+  router bgp 1
+    neighbor 1.1.1.1 remote-as 1
+    neighbor 1.1.1.1 update-source lo
+    address-family l2vpn evpn
+      neighbor 1.1.1.1 activate
+      advertise-all-vni
+    exit-address-family
+  exit
+
+  router ospf
+    network 1.1.1.2/32 area 0
+    network 10.1.1.0/30 area 0
+  exit
+end
+write memory
+
+show ip route
+```
+
+- On `_tat-nguy-3`:
+
+```vtysh
+configure terminal
+  no ipv6 forwarding
+  interface lo
+    ip address 1.1.1.3/32
+  exit
+  interface eth1
+    ip address 10.1.1.6/30
+    no shutdown
+  exit
+
+  router bgp 1
+    neighbor 1.1.1.1 remote-as 1
+    neighbor 1.1.1.1 update-source lo
+    address-family l2vpn evpn
+      neighbor 1.1.1.1 activate
+      advertise-all-vni
+    exit-address-family
+  exit
+
+  router ospf
+    network 1.1.1.3/32 area 0
+    network 10.1.1.4/30 area 0
+  exit  
+end
+write memory
+
+show ip route
+```
+
+- On `_tat-nguy-4`:
+
+```vtysh
+configure terminal
+  no ipv6 forwarding
+  interface lo
+    ip address 1.1.1.4/32
+  exit
+  interface eth2
+    ip address 10.1.1.10/30
+    no shutdown
+  exit
+
+  router bgp 1
+    neighbor 1.1.1.1 remote-as 1
+    neighbor 1.1.1.1 update-source lo
+    address-family l2vpn evpn
+      neighbor 1.1.1.1 activate
+      advertise-all-vni
+    exit-address-family
+  exit
+
+  router ospf
+    network 1.1.1.4/32 area 0
+    network 10.1.1.8/30 area 0
+  exit
+
+end
+write memory
+
+show ip route
+
+
+
+```
+
+
 ## Additional Information
 
 ### Docker commands
 
 - Build Docker image: `docker build -t my-username/my-image .`
 
+### vtysh
+
+```bash
+vtysh   # _tat-nguy-1#
+
+# global configuration
+configure terminal  # (config)#
+
+# sub-modes for one interface or one protocol
+interface eth0  # (config-if)#
+# or
+router bgp 1    # (config-router)#
+
+# goes up one level
+exit
+
+# jumps straight back to _tat-nguy-1#
+end
+
+# to save the running config to /etc/frr/frr.conf
+# Because /etc/frr is persistent in Docker, the config survives a restart.
+write memory 
 ```
